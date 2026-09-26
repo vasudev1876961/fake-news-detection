@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  truthpulse-ui:
+    build: .
+    container_name: truthpulse-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - NEWS_API_KEY=${NEWS_API_KEY:-d3f79868d24a46cebabd4a40beddbc18}
+    restart: unless-stopped
+
+  truthpulse-api:
+    build: .
+    container_name: truthpulse-api
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - NEWS_API_KEY=${NEWS_API_KEY:-d3f79868d24a46cebabd4a40beddbc18}
+    restart: unless-stopped
