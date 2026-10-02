@@ -5,14 +5,16 @@ Linguistic Stylometry, URL Web Scraping, and Live Global News Monitoring.
 """
 import io
 import json
+import time
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.predict import predict_detailed, label, load_all_models
+from src.predict import predict_detailed, predict_batch, label, load_all_models
 from src.realtime import fetch_news
 from src.scraper import extract_article_from_url
+from src.explain import generate_highlighted_html
 
 # ==============================================================================
 # Page Configuration & Global Styling
@@ -329,6 +331,7 @@ with tab_single:
                 <div class="glass-card">
                     <h5 style="margin-top:0;">📊 Linguistic Diagnostics</h5>
                     <b>Word Count:</b> {stats.get('word_count', 0)} words<br>
+                    <b>Reading Level:</b> {stats.get('reading_level', 'Standard')} (Score: {stats.get('reading_ease', 0)}/100)<br>
                     <b>Reading Time:</b> ~{stats.get('reading_time_mins', 0)} min<br>
                     <b>Lexical Diversity:</b> {diag.get('lexical_diversity_pct', 0)}%<br>
                     <b>Sensationalism Index:</b> <span style="color: {'#FB7185' if sens.get('score', 0) > 40 else '#34D399'}">{sens.get('score', 0)}% ({sens.get('level', 'N/A')})</span>
@@ -365,6 +368,38 @@ with tab_single:
                     st.markdown(html_cues, unsafe_allow_html=True)
                 else:
                     st.info("No strong formal sourcing indicators identified in vocabulary.")
+
+            # Interactive In-Text Token Highlighting
+            st.markdown("##### 📝 Interactive In-Text Evidence Highlighting")
+            st.caption("Visual breakdown of suspicious sensationalist tokens (pink/red) versus credible journalistic cues (emerald green):")
+            highlighted_markup = generate_highlighted_html(user_text, real_cues, fake_cues)
+            st.markdown(highlighted_markup, unsafe_allow_html=True)
+
+            # Export Analysis Report
+            st.write("")
+            col_exp1, col_exp2 = st.columns([1, 3])
+            with col_exp1:
+                res_export = {
+                    "text_preview": user_text[:300],
+                    "prediction": res["final_label"],
+                    "confidence": res["confidence"],
+                    "is_real": res["is_real"],
+                    "model_probabilities": {
+                        "prob_real": res["prob_real_pct"],
+                        "prob_fake": res["prob_fake_pct"]
+                    },
+                    "individual_models": res["models"],
+                    "xai_cues": res.get("xai", {}),
+                    "diagnostics": res.get("diagnostics", {})
+                }
+                st.download_button(
+                    label="📥 Download JSON Report",
+                    data=json.dumps(res_export, indent=2),
+                    file_name="truthpulse_audit_report.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+
 
 
 # ==============================================================================
@@ -529,31 +564,25 @@ with tab_batch:
         default_col_idx = batch_df.columns.get_loc(candidate_cols[0]) if candidate_cols else 0
         target_col = st.selectbox("Select Column with News Text:", batch_df.columns, index=default_col_idx)
 
-        if st.button("🚀 Run Batch Audit", type="primary", use_container_width=True):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            predictions = []
-            confidences = []
-            prob_reals = []
-            
+        if st.button("🚀 Run Vectorized Batch Audit", type="primary", use_container_width=True):
             total_rows = len(batch_df)
-            for i, row in batch_df.iterrows():
-                val = str(row[target_col])
-                res = predict_detailed(val, weights=weights, include_xai=False, include_diagnostics=False)
-                predictions.append(res["final_label"])
-                confidences.append(res["confidence"])
-                prob_reals.append(res["prob_real_pct"])
+            raw_texts = batch_df[target_col].astype(str).tolist()
+            
+            with st.spinner(f"Auditing {total_rows} articles using parallel matrix inference..."):
+                t_start = time.perf_counter()
+                batch_results = predict_batch(raw_texts, weights=weights)
+                t_elapsed = time.perf_counter() - t_start
                 
-                if (i + 1) % max(1, total_rows // 20) == 0 or (i + 1) == total_rows:
-                    progress_bar.progress((i + 1) / total_rows)
-                    status_text.text(f"Evaluated {i + 1}/{total_rows} articles...")
-
-            batch_df["TruthPulse_Label"] = predictions
+            labels = [r["label"] for r in batch_results]
+            confidences = [r["confidence"] for r in batch_results]
+            prob_reals = [r["prob_real"] for r in batch_results]
+            
+            batch_df["TruthPulse_Label"] = labels
             batch_df["Confidence_%"] = confidences
             batch_df["Prob_Real_%"] = prob_reals
-
-            st.success("✅ Batch processing finished successfully!")
+            
+            throughput = round(total_rows / max(0.0001, t_elapsed), 1)
+            st.success(f"⚡ Batch processing finished in **{t_elapsed:.3f}s** ({throughput:,} articles/sec)!")
             
             # Summary Metrics & Chart
             real_cnt = (batch_df["TruthPulse_Label"] == "Real News").sum()
@@ -574,16 +603,28 @@ with tab_batch:
                 pie_fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#E2E8F0"))
                 st.plotly_chart(pie_fig, use_container_width=True)
 
-            # Download CSV
-            csv_buffer = io.StringIO()
-            batch_df.to_csv(csv_buffer, index=False)
-            st.download_button(
-                label="📥 Download Labeled Dataset CSV",
-                data=csv_buffer.getvalue(),
-                file_name="audited_news_predictions.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            # Dual Export: Download CSV & Download JSON
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                csv_buffer = io.StringIO()
+                batch_df.to_csv(csv_buffer, index=False)
+                st.download_button(
+                    label="📥 Download Labeled CSV",
+                    data=csv_buffer.getvalue(),
+                    file_name="audited_news_predictions.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            with col_d2:
+                json_buffer = batch_df.to_json(orient="records", indent=2)
+                st.download_button(
+                    label="📥 Download Labeled JSON",
+                    data=json_buffer,
+                    file_name="audited_news_predictions.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+
 
 
 # ==============================================================================

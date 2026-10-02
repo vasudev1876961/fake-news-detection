@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing & logs
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Antigravity & IDE scratch
+.gemini/
+.idea/
+.vscode/
+
+# Local sensitive files
+.env
